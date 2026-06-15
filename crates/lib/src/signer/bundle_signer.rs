@@ -138,6 +138,19 @@ mod tests {
         VersionedTransactionResolved::from_kora_built_transaction(&versioned).unwrap()
     }
 
+    fn create_test_resolved_with_kora_signer_at_slot_one(
+        kora_signer: &Pubkey,
+    ) -> VersionedTransactionResolved {
+        let attacker = Keypair::new();
+        let attacker_ix = transfer(&attacker.pubkey(), &Pubkey::new_unique(), 1000);
+        let kora_ix = transfer(kora_signer, &Pubkey::new_unique(), 1000);
+        let message = Message::new(&[attacker_ix, kora_ix], Some(&attacker.pubkey()));
+        let transaction = Transaction::new_unsigned(message);
+        let versioned = solana_sdk::transaction::VersionedTransaction::from(transaction);
+
+        VersionedTransactionResolved::from_kora_built_transaction(&versioned).unwrap()
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_sign_transaction_for_bundle_success() {
@@ -203,6 +216,34 @@ mod tests {
             &mut resolved,
             &signer,
             &fee_payer,
+            &blockhash,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KoraError::InvalidTransaction(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_sign_transaction_for_bundle_rejects_kora_at_noncanonical_slot() {
+        let fee_payer_keypair = Keypair::new();
+        let kora = fee_payer_keypair.pubkey();
+
+        let blockhash = Some(Hash::new_unique());
+        let config = ConfigMockBuilder::new().build();
+        let signer = setup_bundle_signer_state(&fee_payer_keypair, &config);
+
+        // Harvesting layout: an attacker is the canonical fee payer at slot 0 and Kora is a
+        // required signer at a later slot. Kora must refuse rather than fill its non-zero slot,
+        // so a caller cannot collect a second pool signature onto the same transaction.
+        let mut resolved = create_test_resolved_with_kora_signer_at_slot_one(&kora);
+
+        let result = BundleSigner::sign_transaction_for_bundle(
+            &mut resolved,
+            &signer,
+            &kora,
             &blockhash,
             &config,
         )
