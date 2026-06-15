@@ -559,7 +559,11 @@ impl LookupTableUtil {
         rpc_client: &RpcClient,
         lookup_table_lookups: &[MessageAddressTableLookup],
     ) -> Result<Vec<Pubkey>, KoraError> {
-        let mut resolved_addresses = Vec::new();
+        // Solana orders loaded accounts as all writable across every table, then all readonly
+        // across every table. Resolving per-table would mis-order indices for multi-table
+        // messages and decompile instructions against the wrong accounts.
+        let mut writable_addresses = Vec::new();
+        let mut readonly_addresses = Vec::new();
 
         // Maybe we can use caching here, there's a chance the lookup tables get updated though, so tbd
         for lookup in lookup_table_lookups {
@@ -582,10 +586,9 @@ impl LookupTableUtil {
                     ))
                 })?;
 
-            // Resolve writable addresses
             for &index in &lookup.writable_indexes {
                 if let Some(address) = address_lookup_table.addresses.get(index as usize) {
-                    resolved_addresses.push(*address);
+                    writable_addresses.push(*address);
                 } else {
                     return Err(KoraError::InvalidTransaction(format!(
                         "Lookup table index {index} out of bounds for writable addresses"
@@ -593,10 +596,9 @@ impl LookupTableUtil {
                 }
             }
 
-            // Resolve readonly addresses
             for &index in &lookup.readonly_indexes {
                 if let Some(address) = address_lookup_table.addresses.get(index as usize) {
-                    resolved_addresses.push(*address);
+                    readonly_addresses.push(*address);
                 } else {
                     return Err(KoraError::InvalidTransaction(format!(
                         "Lookup table index {index} out of bounds for readonly addresses"
@@ -605,7 +607,8 @@ impl LookupTableUtil {
             }
         }
 
-        Ok(resolved_addresses)
+        writable_addresses.extend(readonly_addresses);
+        Ok(writable_addresses)
     }
 }
 
@@ -1404,6 +1407,63 @@ mod tests {
         assert_eq!(resolved_addresses[0], address1);
         assert_eq!(resolved_addresses[1], address3);
         assert_eq!(resolved_addresses[2], address2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_lookup_table_addresses_multi_table_canonical_ordering() {
+        let config = setup_test_config();
+        let _m = setup_config_mock(config.clone());
+
+        let kora_ata = Pubkey::new_unique();
+        let attacker_ata = Pubkey::new_unique();
+
+        let table_account = |address: Pubkey| {
+            let table = AddressLookupTable {
+                meta: LookupTableMeta {
+                    deactivation_slot: u64::MAX,
+                    last_extended_slot: 0,
+                    last_extended_slot_start_index: 0,
+                    authority: Some(Pubkey::new_unique()),
+                    _padding: 0,
+                },
+                addresses: vec![address].into(),
+            };
+            Account {
+                data: table.serialize_for_tests().unwrap(),
+                executable: false,
+                lamports: 0,
+                owner: Pubkey::new_unique(),
+                rent_epoch: 0,
+            }
+        };
+        let kora_account = table_account(kora_ata);
+        let attacker_account = table_account(attacker_ata);
+
+        let rpc_client = RpcMockBuilder::new()
+            .build_with_sequential_accounts(vec![&kora_account, &attacker_account]);
+
+        // Kora's ATA is readonly in the earlier table; the attacker ATA is writable in the later
+        // table. Solana loads all writable across tables before all readonly, so the canonical
+        // order is [attacker_ata, kora_ata] regardless of table position.
+        let lookups = vec![
+            solana_message::v0::MessageAddressTableLookup {
+                account_key: Pubkey::new_unique(),
+                writable_indexes: vec![],
+                readonly_indexes: vec![0],
+            },
+            solana_message::v0::MessageAddressTableLookup {
+                account_key: Pubkey::new_unique(),
+                writable_indexes: vec![0],
+                readonly_indexes: vec![],
+            },
+        ];
+
+        let resolved =
+            LookupTableUtil::resolve_lookup_table_addresses(&config, &rpc_client, &lookups)
+                .await
+                .unwrap();
+
+        assert_eq!(resolved, vec![attacker_ata, kora_ata]);
     }
 
     #[tokio::test]
