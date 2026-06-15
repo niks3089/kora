@@ -14,4 +14,7 @@ pub enum JitoError {
 
     #[error("Bundle payment insufficient: required {0} lamports, found {1} lamports")]
     InsufficientBundlePayment(u64, u64),
+
+    #[error("signBundle cannot be used when payment is required; use signAndSendBundle so Kora submits the bundle atomically and the payment cannot be dropped")]
+    PaidSignBundleNotSupported,
 }

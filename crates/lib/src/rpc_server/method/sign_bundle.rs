@@ -69,6 +69,13 @@ pub async fn sign_bundle(
     let fee_payer = signer.pubkey();
     let payment_destination = config.kora.get_payment_address(&fee_payer)?;
 
+    // signBundle returns independently valid signed transactions, so a caller can drop the
+    // payment leg and broadcast a sponsored leg standalone. Cross-transaction payment is only
+    // safe when Kora controls atomic submission, which only signAndSendBundle does.
+    if config.validation.is_payment_required() {
+        return Err(BundleError::Jito(JitoError::PaidSignBundleNotSupported).into());
+    }
+
     let sig_verify = sig_verify || config.kora.force_sig_verify;
     let processor = BundleProcessor::process_bundle(
         &transactions_to_process,
@@ -198,6 +205,61 @@ mod tests {
         if let KoraError::JitoError(msg) = err {
             assert!(msg.contains("not enabled"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_sign_bundle_rejected_when_payment_required() {
+        let _m = ConfigMockBuilder::new().with_bundle_enabled(true).build_and_setup();
+        let _ = setup_or_get_test_signer();
+
+        let rpc_client = Arc::new(RpcMockBuilder::new().build());
+
+        let request = SignBundleRequest {
+            transactions: vec!["sometx".to_string()],
+            signer_key: None,
+            sig_verify: true,
+            user_id: None,
+            sign_only_indices: None,
+        };
+
+        let result = sign_bundle(&rpc_client, request).await;
+
+        assert!(result.is_err(), "Paid pricing must reject signBundle");
+        let err = result.unwrap_err();
+        assert!(matches!(err, KoraError::JitoError(_)));
+        if let KoraError::JitoError(msg) = err {
+            assert!(msg.contains("signAndSendBundle"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sign_bundle_allowed_when_pricing_free() {
+        let mut validation = ValidationConfigBuilder::new().build();
+        validation.price = PriceConfig { model: PriceModel::Free };
+        let _m = ConfigMockBuilder::new()
+            .with_bundle_enabled(true)
+            .with_validation(validation)
+            .build_and_setup();
+        let _ = setup_or_get_test_signer();
+
+        let rpc_client = Arc::new(RpcMockBuilder::new().build());
+
+        let request = SignBundleRequest {
+            transactions: vec!["sometx".to_string()],
+            signer_key: None,
+            sig_verify: true,
+            user_id: None,
+            sign_only_indices: None,
+        };
+
+        let result = sign_bundle(&rpc_client, request).await;
+
+        // Free pricing must pass the paid-bundle gate; it fails later decoding the dummy tx.
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let hit_paid_gate =
+            matches!(&err, KoraError::JitoError(msg) if msg.contains("signAndSendBundle"));
+        assert!(!hit_paid_gate, "Free pricing should not hit the paid-bundle gate, got: {err:?}");
     }
 
     #[tokio::test]
