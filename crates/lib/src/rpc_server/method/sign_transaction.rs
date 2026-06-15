@@ -110,10 +110,10 @@ mod tests {
     use solana_sdk::pubkey::Pubkey;
     use std::str::FromStr;
 
-    fn create_compute_budget_only_encoded_transaction() -> String {
+    fn create_compute_budget_only_encoded_transaction(fee_payer: &Pubkey) -> String {
         let message = VersionedMessage::Legacy(Message::new(
             &[ComputeBudgetInstruction::set_compute_unit_limit(200_000)],
-            Some(&Pubkey::new_unique()),
+            Some(fee_payer),
         ));
         let transaction = TransactionUtil::new_unsigned_versioned_transaction(message);
 
@@ -175,9 +175,10 @@ mod tests {
         let _ = setup_or_get_test_usage_limiter().await;
 
         let rpc_client = Arc::new(RpcMockBuilder::new().build());
+        let target_pubkey = Pubkey::from_str(&target_pubkey).unwrap();
         let request = SignTransactionRequest {
-            transaction: create_compute_budget_only_encoded_transaction(),
-            signer_key: Some(target_pubkey.clone()),
+            transaction: create_compute_budget_only_encoded_transaction(&target_pubkey),
+            signer_key: Some(target_pubkey.to_string()),
             sig_verify: true,
             user_id: None,
         };
@@ -188,8 +189,6 @@ mod tests {
             Err(KoraError::InvalidTransaction(message))
                 if message.contains("only ComputeBudget instructions")
         ));
-
-        let target_pubkey = Pubkey::from_str(&target_pubkey).unwrap();
         let pool = get_signer_pool().unwrap();
         assert!(!pool.probe_in_flight(&target_pubkey).unwrap());
         assert!(pool.get_signer_by_pubkey(&target_pubkey.to_string()).is_ok());

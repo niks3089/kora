@@ -90,6 +90,18 @@ pub trait VersionedTransactionOps {
     fn verified_signers(&self) -> HashSet<Pubkey>;
     fn find_signer_position(&self, signer_pubkey: &Pubkey) -> Result<usize, KoraError>;
 
+    /// Signature slot Kora may write to, enforcing that its signer is the canonical fee payer at
+    /// account index 0. A paymaster must never co-sign a non-fee-payer slot, so any transaction
+    /// whose index-0 signer is not Kora's selected signer is rejected.
+    fn require_canonical_fee_payer(&self, fee_payer: &Pubkey) -> Result<usize, KoraError> {
+        match self.signer_pubkeys().first() {
+            Some(first) if first == fee_payer => Ok(0),
+            _ => Err(KoraError::InvalidTransaction(
+                "Kora signer must be the canonical fee payer at account index 0".to_string(),
+            )),
+        }
+    }
+
     async fn sign_transaction(
         &mut self,
         config: &Config,
@@ -376,6 +388,7 @@ impl VersionedTransactionOps for VersionedTransactionResolved {
         will_send: bool,
     ) -> Result<(VersionedTransaction, String), KoraError> {
         let fee_payer = selected_signer.pubkey();
+        let fee_payer_position = self.require_canonical_fee_payer(&fee_payer)?;
         let validator = TransactionValidator::new(config, fee_payer)?;
 
         // Validate transaction and accounts (already resolved)
@@ -499,8 +512,6 @@ impl VersionedTransactionOps for VersionedTransactionResolved {
                 }
             };
 
-        // Find the fee payer position - don't assume it's at position 0
-        let fee_payer_position = self.find_signer_position(&fee_payer)?;
         let signatures_len = transaction.signatures.len();
         let signature_slot = match transaction.signatures.get_mut(fee_payer_position) {
             Some(slot) => slot,
@@ -753,6 +764,63 @@ mod tests {
         assert_eq!(transaction.find_signer_position(&keypair1.pubkey()).unwrap(), 0);
         assert_eq!(transaction.find_signer_position(&keypair2.pubkey()).unwrap(), 1);
         assert_eq!(transaction.find_signer_position(&keypair3.pubkey()).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_require_canonical_fee_payer_rejects_noncanonical_signer_slot_v0() {
+        let attacker = Keypair::new();
+        let kora = Keypair::new();
+        let program_id = Pubkey::new_unique();
+
+        // slot 0 = attacker (real fee payer), slot 1 = Kora co-signer: the KORA-48 arrangement.
+        let v0_message = v0::Message {
+            header: solana_message::MessageHeader {
+                num_required_signatures: 2,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: 1,
+            },
+            account_keys: vec![attacker.pubkey(), kora.pubkey(), program_id],
+            recent_blockhash: Hash::default(),
+            instructions: vec![CompiledInstruction {
+                program_id_index: 2,
+                accounts: vec![0, 1],
+                data: vec![1, 2, 3],
+            }],
+            address_table_lookups: vec![],
+        };
+        let transaction = TransactionUtil::new_unsigned_versioned_transaction_resolved(
+            VersionedMessage::V0(v0_message),
+        )
+        .unwrap();
+
+        assert_eq!(transaction.require_canonical_fee_payer(&attacker.pubkey()).unwrap(), 0);
+        assert!(matches!(
+            transaction.require_canonical_fee_payer(&kora.pubkey()),
+            Err(KoraError::InvalidTransaction(_))
+        ));
+        assert!(matches!(
+            transaction.require_canonical_fee_payer(&program_id),
+            Err(KoraError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn test_require_canonical_fee_payer_legacy() {
+        let kora = Keypair::new();
+        let instruction = Instruction::new_with_bytes(
+            Pubkey::new_unique(),
+            &[1, 2, 3],
+            vec![AccountMeta::new(kora.pubkey(), true)],
+        );
+        let message = VersionedMessage::Legacy(Message::new(&[instruction], Some(&kora.pubkey())));
+        let transaction =
+            TransactionUtil::new_unsigned_versioned_transaction_resolved(message).unwrap();
+
+        assert_eq!(transaction.require_canonical_fee_payer(&kora.pubkey()).unwrap(), 0);
+        assert!(matches!(
+            transaction.require_canonical_fee_payer(&Pubkey::new_unique()),
+            Err(KoraError::InvalidTransaction(_))
+        ));
     }
 
     #[test]

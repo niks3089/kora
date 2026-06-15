@@ -25,6 +25,8 @@ impl BundleSigner {
             }
         }
 
+        let fee_payer_position = resolved.require_canonical_fee_payer(fee_payer)?;
+
         let message_bytes = resolved.transaction.message.serialize();
         let sign_timeout = Duration::from_secs(config.kora.sign_timeout_seconds);
         let max_retries = config.kora.sign_max_retries;
@@ -66,7 +68,6 @@ impl BundleSigner {
             }
         };
 
-        let fee_payer_position = resolved.find_signer_position(fee_payer)?;
         let signatures_len = resolved.transaction.signatures.len();
         let signature_slot = match resolved.transaction.signatures.get_mut(fee_payer_position) {
             Some(slot) => slot,
