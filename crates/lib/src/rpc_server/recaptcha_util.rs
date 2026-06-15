@@ -34,6 +34,7 @@ impl RecaptchaConfig {
         self.protected_methods.iter().any(|m| m == method)
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn validate(&self, token: Option<&str>) -> Result<(), Response<Body>> {
         let token = match token {
             Some(t) if !t.is_empty() => t,
