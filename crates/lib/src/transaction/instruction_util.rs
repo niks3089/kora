@@ -53,6 +53,8 @@ pub enum ParsedSystemInstructionData {
         payer: Pubkey,
         new_account: Pubkey,
         owner: Pubkey,
+        // CreateAccountWithSeed has a distinct required `base` signer; None for plain CreateAccount.
+        base: Option<Pubkey>,
     },
     // Includes withdraw nonce account
     SystemWithdrawNonceAccount {
@@ -1873,13 +1875,33 @@ impl IxUtils {
             // Handle System Program transfers and account creation
             if program_id == SYSTEM_PROGRAM_ID {
                 match bincode::deserialize::<SystemInstruction>(&instruction.data) {
-                    Ok(SystemInstruction::CreateAccount { lamports, owner, .. })
-                    | Ok(SystemInstruction::CreateAccountWithSeed { lamports, owner, .. }) => {
+                    Ok(SystemInstruction::CreateAccount { lamports, owner, .. }) => {
                         parse_system_instruction!(parsed_instructions, instruction, system_create_account, SystemCreateAccount, SystemCreateAccount {
-                            lamports: lamports, owner: owner;
+                            lamports: lamports, owner: owner, base: None;
                             payer: instruction_indexes::system_create_account::PAYER_INDEX,
                             new_account: instruction_indexes::system_create_account::NEW_ACCOUNT_INDEX
                         });
+                    }
+                    Ok(SystemInstruction::CreateAccountWithSeed { lamports, owner, .. }) => {
+                        validate_number_accounts!(instruction, instruction_indexes::system_create_account::REQUIRED_NUMBER_OF_ACCOUNTS_WITH_SEED);
+                        parsed_instructions
+                            .entry(ParsedSystemInstructionType::SystemCreateAccount)
+                            .or_default()
+                            .push(ParsedSystemInstructionData::SystemCreateAccount {
+                                lamports,
+                                owner,
+                                payer: instruction.accounts
+                                    [instruction_indexes::system_create_account::PAYER_INDEX]
+                                    .pubkey,
+                                new_account: instruction.accounts
+                                    [instruction_indexes::system_create_account::NEW_ACCOUNT_INDEX]
+                                    .pubkey,
+                                base: Some(
+                                    instruction.accounts
+                                        [instruction_indexes::system_create_account::BASE_INDEX]
+                                        .pubkey,
+                                ),
+                            });
                     }
                     Ok(SystemInstruction::Transfer { lamports }) => {
                         parse_system_instruction!(parsed_instructions, instruction, system_transfer, SystemTransfer, SystemTransfer {
@@ -4229,11 +4251,13 @@ mod tests {
                 payer: parsed_payer,
                 new_account: parsed_new_account,
                 owner: parsed_owner,
+                base: parsed_base,
             } => {
                 assert_eq!(*parsed_lamports, lamports);
                 assert_eq!(*parsed_payer, payer.pubkey());
                 assert_eq!(*parsed_new_account, new_account.pubkey());
                 assert_eq!(*parsed_owner, owner);
+                assert_eq!(*parsed_base, None);
             }
             _ => panic!("Expected SystemCreateAccount variant"),
         }
@@ -4287,11 +4311,13 @@ mod tests {
                 payer: parsed_payer,
                 new_account: parsed_new_account,
                 owner: parsed_owner,
+                base: parsed_base,
             } => {
                 assert_eq!(*parsed_lamports, lamports);
                 assert_eq!(*parsed_payer, payer.pubkey());
                 assert_eq!(*parsed_new_account, new_account);
                 assert_eq!(*parsed_owner, owner);
+                assert_eq!(*parsed_base, Some(payer.pubkey()));
             }
             _ => panic!("Expected SystemCreateAccount variant"),
         }

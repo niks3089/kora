@@ -65,6 +65,9 @@ pub mod instruction_indexes {
         pub const REQUIRED_NUMBER_OF_ACCOUNTS: usize = 2;
         pub const PAYER_INDEX: usize = 0;
         pub const NEW_ACCOUNT_INDEX: usize = 1;
+        // CreateAccountWithSeed adds the base signer as a third account.
+        pub const REQUIRED_NUMBER_OF_ACCOUNTS_WITH_SEED: usize = 3;
+        pub const BASE_INDEX: usize = 2;
     }
 
     pub mod system_transfer {
