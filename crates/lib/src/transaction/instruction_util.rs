@@ -147,6 +147,8 @@ pub enum ParsedSPLInstructionData {
     // Includes close account
     SplTokenCloseAccount {
         owner: Pubkey,
+        account: Pubkey,
+        destination: Pubkey,
         multisig_signers: Vec<Pubkey>,
         is_2022: bool,
     },
@@ -2717,6 +2719,12 @@ impl IxUtils {
                                     owner: instruction.accounts
                                         [instruction_indexes::spl_token_close_account::OWNER_INDEX]
                                         .pubkey,
+                                    account: instruction.accounts
+                                        [instruction_indexes::spl_token_close_account::ACCOUNT_INDEX]
+                                        .pubkey,
+                                    destination: instruction.accounts
+                                        [instruction_indexes::spl_token_close_account::DESTINATION_INDEX]
+                                        .pubkey,
                                     multisig_signers: Self::extract_multisig_signers(instruction, 3),
                                     is_2022: false,
                                 });
@@ -3077,6 +3085,12 @@ impl IxUtils {
                                 .push(ParsedSPLInstructionData::SplTokenCloseAccount {
                                     owner: instruction.accounts
                                         [instruction_indexes::spl_token_close_account::OWNER_INDEX]
+                                        .pubkey,
+                                    account: instruction.accounts
+                                        [instruction_indexes::spl_token_close_account::ACCOUNT_INDEX]
+                                        .pubkey,
+                                    destination: instruction.accounts
+                                        [instruction_indexes::spl_token_close_account::DESTINATION_INDEX]
                                         .pubkey,
                                     multisig_signers: Self::extract_multisig_signers(instruction, 3),
                                     is_2022: true,
