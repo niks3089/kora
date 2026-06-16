@@ -826,6 +826,43 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_sign_transaction_rejects_noncanonical_kora_signer() {
+        // A shared payment_address cannot fund a second harvest (KORA-42/KORA-50): Kora signs only
+        // the canonical fee payer at index 0. Selecting a Kora pool signer that sits at a later
+        // signer slot (attacker as fee payer at slot 0) must be rejected before signing.
+        let kora = Keypair::new();
+        let attacker = Keypair::new();
+        let attacker_ix = solana_system_interface::instruction::transfer(
+            &attacker.pubkey(),
+            &Pubkey::new_unique(),
+            1000,
+        );
+        let kora_ix = solana_system_interface::instruction::transfer(
+            &kora.pubkey(),
+            &Pubkey::new_unique(),
+            1000,
+        );
+        let message = VersionedMessage::Legacy(Message::new(
+            &[attacker_ix, kora_ix],
+            Some(&attacker.pubkey()),
+        ));
+        let mut resolved =
+            TransactionUtil::new_unsigned_versioned_transaction_resolved(message).unwrap();
+
+        let config = setup_test_config();
+        let signer = std::sync::Arc::new(
+            solana_keychain::Signer::from_memory(&kora.to_base58_string()).unwrap(),
+        );
+        let rpc_client = RpcMockBuilder::new().build();
+
+        let result = resolved.sign_transaction(&config, &signer, &rpc_client, false).await;
+        assert!(
+            matches!(result, Err(KoraError::InvalidTransaction(ref msg)) if msg.contains("canonical fee payer")),
+            "Expected canonical fee-payer rejection, got: {result:?}"
+        );
+    }
+
     #[test]
     fn test_signer_pubkeys_returns_only_required_signers() {
         let keypair1 = Keypair::new();
