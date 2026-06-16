@@ -510,6 +510,8 @@ pub const PARSED_DATA_FIELD_FREEZE_AUTHORITY: &str = "freezeAuthority";
 pub const PARSED_DATA_FIELD_AUTHORITY_TYPE: &str = "authorityType";
 pub const PARSED_DATA_FIELD_MULTISIG_ACCOUNT: &str = "multisig";
 pub const PARSED_DATA_FIELD_SIGNERS: &str = "signers";
+pub const PARSED_DATA_FIELD_M: &str = "m";
+pub const PARSED_DATA_FIELD_RENT_SYSVAR: &str = "rentSysvar";
 
 impl IxUtils {
     /// Helper method to extract a field as a string from JSON with proper error handling
@@ -1711,7 +1713,20 @@ impl IxUtils {
                     }
                     PARSED_DATA_FIELD_INITIALIZE_ACCOUNT2 => {
                         // InitializeAccount2: [account, mint, rent], owner in data
-                        (vec![16], vec![account_idx, mint_idx])
+                        let rent = Self::get_field_as_pubkey(info, PARSED_DATA_FIELD_RENT_SYSVAR)?;
+                        let rent_idx = Self::get_account_index(account_keys_hashmap, &rent)?;
+                        let data = if is_spl_token_program {
+                            spl_token_interface::instruction::TokenInstruction::InitializeAccount2 {
+                                owner,
+                            }
+                            .pack()
+                        } else {
+                            spl_token_2022_interface::instruction::TokenInstruction::InitializeAccount2 {
+                                owner,
+                            }
+                            .pack()
+                        };
+                        (data, vec![account_idx, mint_idx, rent_idx])
                     }
                     PARSED_DATA_FIELD_INITIALIZE_ACCOUNT3 => {
                         // InitializeAccount3: [account, mint], owner in data
@@ -1737,19 +1752,65 @@ impl IxUtils {
                 let multisig = Self::get_field_as_pubkey(info, PARSED_DATA_FIELD_MULTISIG_ACCOUNT)?;
                 let multisig_idx = Self::get_account_index(account_keys_hashmap, &multisig)?;
 
-                // Extract signer pubkeys from signers array (not currently used for reconstruction)
-                let _signers_value = info.get(PARSED_DATA_FIELD_SIGNERS).ok_or_else(|| {
-                    KoraError::SerializationError("Missing 'signers' field".to_string())
-                })?;
+                let m = Self::get_field_as_u64(info, PARSED_DATA_FIELD_M)? as u8;
 
-                // Discriminator based on instruction variant
-                let data = if instruction_type == PARSED_DATA_FIELD_INITIALIZE_MULTISIG {
-                    vec![2] // InitializeMultisig discriminator
-                } else {
-                    vec![19] // InitializeMultisig2 discriminator
-                };
+                let signers = info
+                    .get(PARSED_DATA_FIELD_SIGNERS)
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| {
+                        KoraError::SerializationError(
+                            "Missing or invalid 'signers' field".to_string(),
+                        )
+                    })?;
+                let mut signer_indices = Vec::with_capacity(signers.len());
+                for signer in signers {
+                    let signer_str = signer.as_str().ok_or_else(|| {
+                        KoraError::SerializationError("'signers' entry is not a string".to_string())
+                    })?;
+                    let signer_pubkey = signer_str.parse::<Pubkey>().map_err(|e| {
+                        KoraError::SerializationError(format!(
+                            "Invalid multisig signer '{}': {}",
+                            signer_str,
+                            sanitize_error!(e)
+                        ))
+                    })?;
+                    signer_indices
+                        .push(Self::get_account_index(account_keys_hashmap, &signer_pubkey)?);
+                }
 
-                Ok(CompiledInstruction { program_id_index, accounts: vec![multisig_idx], data })
+                let (data, mut accounts) =
+                    if instruction_type == PARSED_DATA_FIELD_INITIALIZE_MULTISIG {
+                        let rent = Self::get_field_as_pubkey(info, PARSED_DATA_FIELD_RENT_SYSVAR)?;
+                        let rent_idx = Self::get_account_index(account_keys_hashmap, &rent)?;
+                        let data = if is_spl_token_program {
+                            spl_token_interface::instruction::TokenInstruction::InitializeMultisig {
+                                m,
+                            }
+                            .pack()
+                        } else {
+                            spl_token_2022_interface::instruction::TokenInstruction::InitializeMultisig {
+                                m,
+                            }
+                            .pack()
+                        };
+                        (data, vec![multisig_idx, rent_idx])
+                    } else {
+                        let data = if is_spl_token_program {
+                            spl_token_interface::instruction::TokenInstruction::InitializeMultisig2 {
+                                m,
+                            }
+                            .pack()
+                        } else {
+                            spl_token_2022_interface::instruction::TokenInstruction::InitializeMultisig2 {
+                                m,
+                            }
+                            .pack()
+                        };
+                        (data, vec![multisig_idx])
+                    };
+                accounts.extend(signer_indices);
+
+                Ok(CompiledInstruction { program_id_index, accounts, data })
             }
             PARSED_DATA_FIELD_FREEZE_ACCOUNT => {
                 let account = Self::get_field_as_pubkey(info, PARSED_DATA_FIELD_ACCOUNT)?;
@@ -5621,6 +5682,100 @@ mod tests {
         assert_eq!(compiled.program_id_index, 0);
         assert_eq!(compiled.accounts, vec![1, 2, 3, 4]); // source, mint, delegate, owner indices
         assert_eq!(compiled.data, instruction.data);
+    }
+
+    #[test]
+    fn test_reconstruct_spl_token_initialize_multisig_preserves_signers_and_threshold() {
+        let multisig = Pubkey::new_unique();
+        let fee_payer = Pubkey::new_unique();
+        let other_signer = Pubkey::new_unique();
+        let m = 1u8;
+
+        let real_ix = spl_token_interface::instruction::initialize_multisig(
+            &spl_token_interface::ID,
+            &multisig,
+            &[&fee_payer, &other_signer],
+            m,
+        )
+        .expect("Failed to create initialize_multisig instruction");
+
+        let message = Message::new(&[real_ix.clone()], None);
+        let account_keys_for_parsing = AccountKeys::new(&message.account_keys, None);
+        let parsed = parse_instruction::parse(
+            &spl_token_interface::ID,
+            &message.instructions[0],
+            &account_keys_for_parsing,
+            None,
+        )
+        .expect("Failed to parse initialize_multisig instruction");
+
+        let account_keys = message.account_keys.clone();
+        let compiled = IxUtils::reconstruct_spl_token_instruction(
+            &parsed,
+            &IxUtils::build_account_keys_hashmap(&account_keys),
+        )
+        .expect("Failed to reconstruct initialize_multisig instruction");
+
+        assert_eq!(compiled.data, real_ix.data);
+
+        let unpacked =
+            spl_token_interface::instruction::TokenInstruction::unpack(&compiled.data).unwrap();
+        assert!(matches!(
+            unpacked,
+            spl_token_interface::instruction::TokenInstruction::InitializeMultisig { m: got }
+                if got == m
+        ));
+
+        let reconstructed_signers: Vec<Pubkey> =
+            compiled.accounts[2..].iter().map(|i| account_keys[*i as usize]).collect();
+        assert!(reconstructed_signers.contains(&fee_payer));
+        assert!(reconstructed_signers.contains(&other_signer));
+    }
+
+    #[test]
+    fn test_reconstruct_spl_token_initialize_account2_preserves_owner() {
+        let account = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let real_ix = spl_token_interface::instruction::initialize_account2(
+            &spl_token_interface::ID,
+            &account,
+            &mint,
+            &owner,
+        )
+        .expect("Failed to create initialize_account2 instruction");
+
+        let message = Message::new(&[real_ix.clone()], None);
+        let account_keys_for_parsing = AccountKeys::new(&message.account_keys, None);
+        let parsed = parse_instruction::parse(
+            &spl_token_interface::ID,
+            &message.instructions[0],
+            &account_keys_for_parsing,
+            None,
+        )
+        .expect("Failed to parse initialize_account2 instruction");
+
+        let account_keys = message.account_keys.clone();
+        let compiled = IxUtils::reconstruct_spl_token_instruction(
+            &parsed,
+            &IxUtils::build_account_keys_hashmap(&account_keys),
+        )
+        .expect("Failed to reconstruct initialize_account2 instruction");
+
+        assert_eq!(compiled.data, real_ix.data);
+        assert_eq!(
+            compiled.accounts.len(),
+            instruction_indexes::spl_token_initialize_account2::REQUIRED_NUMBER_OF_ACCOUNTS
+        );
+
+        let unpacked =
+            spl_token_interface::instruction::TokenInstruction::unpack(&compiled.data).unwrap();
+        assert!(matches!(
+            unpacked,
+            spl_token_interface::instruction::TokenInstruction::InitializeAccount2 { owner: got }
+                if got == owner
+        ));
     }
 
     #[test]
